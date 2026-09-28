@@ -10,3 +10,7 @@ htmlcov/
 junit.xml
 trivy-report.json
 *.egg-info/
+ci-env.sh
+.pydeps/
+ruff-report.txt
+trivy-report.txt

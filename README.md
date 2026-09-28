@@ -118,28 +118,93 @@ Notable details:
 Multibranch Pipeline or Pipeline-from-SCM job at this repo; no job
 configuration beyond that is required.
 
-**Agent requirements:** `python3` (3.11+), `docker`, `curl`, and network access
-to PyPI and Docker Hub. Trivy is *not* installed on the agent — it runs from the
-`aquasec/trivy` container, with the Docker socket mounted so it can read the
-image from the local daemon and the Trivy DB cached in the workspace.
+**Agent requirements:** `python3` (3.11+) with *either* a working `venv` *or*
+`pip3`, plus `docker`, `curl` and `git`. Trivy is optional — see below.
 
 **Plugins:** JUnit is required. The Coverage and HTML Publisher plugins are
-optional — the calls to `recordCoverage` and `publishHTML` are wrapped in
-`catchError(buildResult: 'SUCCESS')`, so the build still passes if they are not
-installed.
+optional; the calls to `recordCoverage` and `publishHTML` are wrapped in
+`catchError(buildResult: 'SUCCESS')`, so the build still passes without them.
 
-The smoke-test stage publishes on host port `18000` rather than `8000` to avoid
-colliding with anything else on the agent, and the container name includes
-`$BUILD_NUMBER` so concurrent-ish builds cannot clash. Cleanup of the container,
-the built image and the virtualenv happens in `post { always { ... } }`, so it
-runs even when an earlier stage fails.
+### Running on a containerised Jenkins (docker-out-of-docker)
+
+If Jenkins itself runs in a container that talks to the host's Docker daemon via
+the mounted socket, three things behave differently from a native agent. The
+pipeline detects and handles all three, but they are worth understanding
+because they are the usual causes of a green pipeline turning red on a new
+agent.
+
+**1. `python3 -m venv` can exist and still not work.** Debian and Ubuntu split
+the stdlib `ensurepip` out of `python3` into the separate `python3-venv`
+package. Without it you get:
+
+```
+The virtual environment was not created successfully because ensurepip is not
+available.  On Debian/Ubuntu systems, you need to install the python3-venv
+package
+```
+
+Python *is* installed in that situation — only pip's bootstrap is missing. The
+`Setup` stage therefore tests for `$VENV/bin/pip` rather than trusting the exit
+status of `python3 -m venv`, and falls back to
+`pip3 install --target <dir>` with `PYTHONPATH` when the venv is unusable. Both
+paths write a `ci-env.sh` that later stages `source`, so the rest of the
+pipeline is identical either way.
+
+Two details in that fallback matter:
+
+- Dependencies are installed **outside `$WORKSPACE`** (in `$WORKSPACE_TMP`).
+  Installed in-tree, they get walked by `ruff` — which turns a clean lint into
+  tens of thousands of findings from third-party code — and shipped into the
+  Docker build context.
+- `pip install` needs `--break-system-packages` on Debian 13 and other
+  PEP 668 "externally managed" Pythons. The flag is added only if the local pip
+  advertises it, so older pip versions still work.
+
+The cleaner long-term fix is to install `python3-venv` on the agent so the venv
+path is taken. In a custom Jenkins image that is one word:
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl jq git unzip ca-certificates gnupg lsb-release \
+        python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+**2. A published port is not on the container's `localhost`.** `docker run -p
+18000:8000` publishes to the *host*, so `curl localhost:18000` from inside the
+Jenkins container connects to nothing. The `Smoke test` stage instead detects
+its own Docker network (`docker inspect $(hostname)`) and attaches the
+application container to it, then reaches it by container name over Docker's
+embedded DNS — no published ports, and no host-port collisions between
+concurrent jobs. On a native agent it publishes a port and uses `localhost`; on
+the default `bridge` network (which has no embedded DNS) it falls back to
+`host.docker.internal`.
+
+**3. `-v "$WORKSPACE:/work"` silently mounts an empty directory.** Volume paths
+are resolved by the *daemon*, on the host. `$WORKSPACE` is
+`/var/jenkins_home/workspace/...`, which exists only inside the Jenkins
+container, so the daemon happily creates an empty directory at that path
+instead. The `Image scan` stage therefore never mounts the workspace: it uses
+the agent's `trivy` binary when one is present, and its container fallback
+redirects stdout on the Jenkins side (`> trivy-report.json`) rather than using
+Trivy's `--output`, with the vulnerability DB cached in a **named volume**
+(which is daemon-managed and so unaffected).
+
+Note that `docker build` needs no such care — the CLI streams the build context
+over the socket, so it reads the workspace from inside the container.
 
 ## Verification status
 
-Every gate in this repo was executed locally before being committed: ruff clean,
-9 tests passing at 100% coverage, image built and smoke-tested (returning
-healthy and running as uid 10001), and Trivy reporting 0 findings with the
-HIGH/CRITICAL gate exiting 0.
+Every gate was executed before being committed, in **both** environments:
+
+- **macOS host (venv path):** ruff clean, 9 tests at 100% coverage, coverage gate
+  confirmed to fail at 36% when tests are withheld, image built and
+  smoke-tested (healthy, running as uid 10001), Trivy 0 findings, gate exit 0.
+- **Containerised Jenkins agent (`pip --target` fallback path):** the original
+  `ensurepip` failure reproduced, then all seven stages run from the Jenkinsfile
+  verbatim — Setup, Lint, Tests (9 passed / 100%), Docker build, Smoke test
+  (reached over the shared Docker network), and Trivy (agent binary, gate exit
+  0) with both reports landing in the workspace.
 
 ## Deliberately out of scope
 

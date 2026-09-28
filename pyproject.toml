@@ -7,6 +7,8 @@ requires-python = ">=3.11"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Safety net: never lint dependencies if they are ever installed in-tree.
+extend-exclude = [".pydeps"]
 
 [tool.ruff.lint]
 # E/F pycodestyle+pyflakes, I import sorting, B bugbear, UP pyupgrade, D docstrings

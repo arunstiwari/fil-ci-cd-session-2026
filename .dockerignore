@@ -12,3 +12,7 @@ junit.xml
 tests
 Jenkinsfile
 README.md
+ci-env.sh
+.pydeps
+ruff-report.txt
+trivy-report.*
