@@ -14,3 +14,5 @@ ci-env.sh
 .pydeps/
 ruff-report.txt
 trivy-report.txt
+.scannerwork/
+sonar-quality-gate.json

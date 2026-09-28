@@ -140,6 +140,61 @@ pipeline {
             }
         }
 
+        stage('SonarQube analysis') {
+            steps {
+                script {
+                    // Both the scanner and the server come from Jenkins global
+                    // config (JCasC): the 'sonar-scanner' tool installation and the
+                    // 'sonarqube' server installation. withSonarQubeEnv injects
+                    // SONAR_HOST_URL and SONAR_AUTH_TOKEN, so no URL or credential
+                    // is hard-coded here. Static scanner settings, including the
+                    // coverage and test report paths, live in
+                    // sonar-project.properties.
+                    def scannerHome = tool 'sonar-scanner'
+                    withSonarQubeEnv('sonarqube') {
+                        sh """
+                            set -eu
+                            '${scannerHome}/bin/sonar-scanner' \
+                              -Dsonar.projectVersion='${env.IMAGE_TAG}'
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube quality gate') {
+            steps {
+                script {
+                    // waitForQualityGate() is shorter but needs a SonarQube ->
+                    // Jenkins webhook; without one it just blocks until it times
+                    // out. tools/sonar_quality_gate.py polls the Compute Engine task
+                    // the scanner recorded instead, so no webhook is needed.
+                    // It exits 0 passed, 1 failed, 2 indeterminate.
+                    def rc
+                    timeout(time: 5, unit: 'MINUTES') {
+                        withSonarQubeEnv('sonarqube') {
+                            rc = sh(returnStatus: true, script: '''
+                                set -eu
+                                . ./ci-env.sh
+                                python3 tools/sonar_quality_gate.py
+                            ''')
+                        }
+                    }
+                    if (rc == 1) {
+                        error 'SonarQube quality gate failed'
+                    } else if (rc != 0) {
+                        // An unreadable gate must never look like a passing one.
+                        unstable 'Could not determine the SonarQube quality gate'
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'sonar-quality-gate.json', allowEmptyArchive: true
+                }
+            }
+        }
+
         stage('Docker build') {
             steps {
                 // The build context is streamed to the daemon by the CLI, so this
